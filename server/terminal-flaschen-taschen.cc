@@ -26,34 +26,35 @@
 #define CURSOR_OFF      "\033[?25l"
 #define CURSOR_ON       "\033[?25h"
 
-// Idea is that we have all colors same width for fast in-place updates.
-// so each pixel needs to be fixed width. Thus we do %03 (which luckily is
-// not interpreted as octal by the terminal)
+// Each character on the screen is divided in a top pixel and bottom pixel.
+// We use the following character which fills the top block:
+#define PIXEL_CHARACTER  "▀"  // Top foreground color, bottom background color
 
-// Setting this Unicode character seems to confuse at least konsole. Also,
-// it is pretty dark.
-//#define PIXEL_FORMAT   "\033[38;2;%03d;%03d;%03dm●"   // Sent per pixel.
+// Now, pixels on the even row will get the foreground color changed, pixels
+// on odd rows the background color. Two pixels one stone. Or something.
+#define ESCAPE_COLOR_FORMAT   "%03d;%03d;%03d"
+#define TOP_PIXEL_COLOR       "\033[38;2;"
+#define BOTTOM_PIXEL_COLOR    "\033[48;2;"
 
-// This is a little dark.
-//#define PIXEL_FORMAT   "\033[38;2;%03d;%03d;%03dm*"   // Sent per pixel.
-
-// So, let's just send two spaces. First space here, rest separate below.
-#define PIXEL_FORMAT   "\033[48;2;%03d;%03d;%03dm "   // Sent per pixel.
-
+// Displaying the framerate at the bottom of the screen. Keep spaceholder.
 #define FPS_PLACEHOLDER "___________"
 
-TerminalFlaschenTaschen::TerminalFlaschenTaschen(int fd, int width, int height)
-    : terminal_fd_(fd), width_(width), height_(height), is_first_(true),
+TerminalFlaschenTaschen::TerminalFlaschenTaschen(int fd, int w, int h)
+    // Height is rounded up to the next even number.
+    : terminal_fd_(fd), width_(w), height_((h + 1) & ~0x1), is_first_(true),
       last_time_(-1) {
     buffer_.append(SCREEN_PREFIX);
     initial_offset_ = buffer_.size();
     char scratch[64];
-    snprintf(scratch, sizeof(scratch), PIXEL_FORMAT, 0, 0, 0); // black.
-    pixel_offset_ = strlen(scratch) + 1;   // one extra space.
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
+    snprintf(scratch, sizeof(scratch),
+             TOP_PIXEL_COLOR    ESCAPE_COLOR_FORMAT "m"
+             BOTTOM_PIXEL_COLOR ESCAPE_COLOR_FORMAT "m"
+             PIXEL_CHARACTER,
+             0, 0, 0, 0, 0, 0); // black.
+    pixel_offset_ = strlen(scratch);
+    for (int y = 0; y < height_ / 2; ++y) {
+        for (int x = 0; x < width_; ++x) {
             buffer_.append(scratch);
-            buffer_.append(" ");          // Need to add space here.
         }
         buffer_.append("\n");
     }
@@ -63,8 +64,16 @@ TerminalFlaschenTaschen::TerminalFlaschenTaschen(int fd, int width, int height)
     fps_offset_ = buffer_.size();
     buffer_.append(FPS_PLACEHOLDER "\n\n");
 
-    snprintf(scratch, sizeof(scratch), SCREEN_CURSOR_UP_FORMAT, height + 2);
+    snprintf(scratch, sizeof(scratch), SCREEN_CURSOR_UP_FORMAT, height_/2 + 2);
     buffer_.append(scratch);
+
+    // Some useful precalculated lengths.
+    snprintf(scratch, sizeof(scratch), ESCAPE_COLOR_FORMAT, 0, 0, 0);
+    color_fmt_length_ = strlen(scratch);
+
+    snprintf(scratch, sizeof(scratch),
+             ESCAPE_COLOR_FORMAT "m" BOTTOM_PIXEL_COLOR, 0, 0, 0);
+    lower_row_pixel_offset_ = strlen(scratch);
 }
 TerminalFlaschenTaschen::~TerminalFlaschenTaschen() {
     if (!is_first_) {
@@ -75,12 +84,15 @@ TerminalFlaschenTaschen::~TerminalFlaschenTaschen() {
 
 void TerminalFlaschenTaschen::SetPixel(int x, int y, const Color &col) {
     if (x < 0 || x >= width_ || y < 0 || y >= height_) return;
+    const int double_row = y/2;
     const int pos = initial_offset_
-        + (width_ * y + x) * pixel_offset_
-        + y;  // <- one newline per y
+        + (width_ * double_row + x) * pixel_offset_
+        + strlen(TOP_PIXEL_COLOR)            // go where the color fmt starts
+        + (y % 2) * lower_row_pixel_offset_  // offset for odd-row y-pixels
+        + double_row;                        // 1 newline per double row
     char *buf = const_cast<char*>(buffer_.data()) + pos;  // Living on the edge
-    snprintf(buf, pixel_offset_, PIXEL_FORMAT, col.r, col.g, col.b);
-    buf[pixel_offset_-1] = ' ';   // overwrite \0-byte with space again.
+    snprintf(buf, color_fmt_length_+1, ESCAPE_COLOR_FORMAT, col.r, col.g, col.b);
+    buf[color_fmt_length_] = 'm';   // overwrite \0-byte with closing 'm' again.
 }
 
 void TerminalFlaschenTaschen::Send() {

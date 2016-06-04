@@ -122,6 +122,8 @@ private:
     const int height_;
     size_t initial_offset_;
     size_t pixel_offset_;
+    size_t lower_row_pixel_offset_;
+    size_t color_fmt_length_;
     size_t fps_offset_;
     bool is_first_;
     std::string buffer_;
